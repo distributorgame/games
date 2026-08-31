@@ -11,5 +11,5 @@ Detail pesanan anda bisa dilihat di link berikut:
 Detail Pesanan
 </x-mail::button>
 
-Terima kasih telah memilih {{ config('app.name') }} untuk kebutuhan top up Anda. Jika Anda memiliki pertanyaan atau membutuhkan bantuan, jangan ragu untuk menghubungi tim dukungan kami.
+Terima kasih telah memilih {{ config('app.name') }} untuk kebutuhan Anda. Jika Anda memiliki pertanyaan atau membutuhkan bantuan, jangan ragu untuk menghubungi tim dukungan kami.
 </x-mail::message>
