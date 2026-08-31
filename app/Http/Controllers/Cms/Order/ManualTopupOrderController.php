@@ -1,0 +1,218 @@
+<?php
+
+namespace App\Http\Controllers\Cms\Order;
+
+use App\Actions\Cms\Order\ManualTopup\SendNotificationAction;
+use App\Actions\Cms\Order\ManualTopup\UpdateProgressAction;
+use App\Actions\Cms\Order\Order\ArchiveAllOrderAction;
+use App\Actions\Main\StoreTransactionAction;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Cms\Order\ManualTopup\SendNotificationRequest;
+use App\Http\Requests\Cms\Order\ManualTopup\UpdateProgressRequest;
+use App\Http\Requests\Main\StoreTransactionRequest;
+use App\Models\Account\Account;
+use App\Models\Order\Order;
+use App\Models\PPOB\PPOBProduct;
+use App\Traits\WithGetFilterData;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+
+class ManualTopupOrderController extends Controller
+{
+    use WithGetFilterData;
+
+    protected string $resource = Order::class;
+
+    /**
+     * Display a listing of the resource.
+     */
+    public function index(Request $request)
+    {
+        Gate::authorize('view'.$this->resource);
+
+        $order = $request?->order ?? 'desc';
+        $orderBy = $request?->orderBy ?? 'created_at';
+        $paginate = $request?->paginate ?? 10;
+        $searchBySpecific = $request?->searchBySpecific ?? '';
+        $search = $request?->search ?? '';
+        $paymentStatusFilter = $request?->payment_status ?? [];
+        $giftSendFilter = $request?->gift_send ?? [];
+
+        $query = Order::with('brand', 'product', 'payment.media')
+            ->whereHas('product', fn ($q) => $q->where('provider', 'manual_topup'))
+            ->withoutArchive();
+
+        // Apply payment status filter
+        if (! empty($paymentStatusFilter)) {
+            $query->where(function ($q) use ($paymentStatusFilter) {
+                foreach ($paymentStatusFilter as $status) {
+                    if ($status === 'pending') {
+                        $q->orWhere('payment_status', 0);
+                    } elseif ($status === 'settlement') {
+                        $q->orWhere('payment_status', 2);
+                    } elseif ($status === 'failed') {
+                        $q->orWhereIn('payment_status', [-1, -2]);
+                    }
+                }
+            });
+        }
+
+        // Apply gift send filter
+        if (! empty($giftSendFilter)) {
+            $query->where(function ($q) use ($giftSendFilter) {
+                foreach ($giftSendFilter as $status) {
+                    $q->orWhere('submited->gift_send', (bool) $status);
+                }
+            });
+        }
+
+        $model = $this->getDataWithFilter(
+            model: $query,
+            searchBy: [
+                'reference',
+                'name',
+                'email',
+                'phone',
+            ],
+            order: $order,
+            orderBy: $orderBy,
+            paginate: $paginate,
+            searchBySpecific: $searchBySpecific,
+            s: $search,
+        );
+
+        // Load media
+        $model->map(function ($item) {
+            if ($item->payment->driver === 'manual') {
+                $item->payment->image = $item->payment?->getFirstMediaUrl('image');
+            }
+            $item->payment->makeHidden('media');
+
+            return $item;
+        });
+
+        return inertia('cms/order/manual-topup/Index', [
+            'data' => $model,
+            'order' => $order,
+            'orderBy' => $orderBy,
+            'paginate' => $paginate,
+            'searchBySpecific' => $searchBySpecific,
+            'search' => $search,
+            'resource' => $this->resource,
+            'paymentStatusFilter' => $paymentStatusFilter,
+            'giftSendFilter' => $giftSendFilter,
+        ]);
+    }
+
+    /**
+     * Archive all orders for this provider.
+     */
+    public function archiveAll(ArchiveAllOrderAction $action)
+    {
+        Gate::authorize('update'.$this->resource);
+
+        $action->handle('manual_topup');
+
+        return back()->with('success', 'All orders archived successfully');
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     */
+    public function create()
+    {
+        Gate::authorize('create'.$this->resource);
+
+        $products = PPOBProduct::query()
+            ->with('brand')
+            ->where('provider', 'manual_topup')
+            ->get();
+
+        return inertia('cms/order/manual-topup/Create', [
+            'products' => $products,
+        ]);
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     */
+    public function store(StoreTransactionRequest $request, StoreTransactionAction $action)
+    {
+        try {
+            DB::transaction(function () use ($request, $action) {
+                return $action->handle($request->only([
+                    'type',
+                    'account_id',
+                    'server_id',
+                    'product_id',
+                    'email',
+                    'name',
+                    'phone',
+                    'payment_type',
+                    'payment_method',
+                    'p_p_o_b_brand_id',
+                    'p_p_o_b_product_id',
+                    'submited',
+                ]));
+            });
+
+            return back()->with('success', 'Order berhasil dibuat');
+        } catch (\Exception $e) {
+            return back()->withErrors(['error' => $e->getMessage()])->withInput();
+        }
+    }
+
+    /**
+     * Display the specified resource.
+     */
+    public function show(Order $order)
+    {
+        Gate::authorize('view'.$this->resource);
+
+        $order->load('brand', 'product', 'notifications', 'media', 'voucherUse.voucher');
+
+        // Try to get Mobile Legends account nickname
+        $mlAccount = null;
+        if (isset($order->submited['account_id']) && isset($order->submited['server_id'])) {
+            $mlAccount = Account::where('game', 'mobilelegend')
+                ->where('uid', $order->submited['account_id'])
+                ->where('server', $order->submited['server_id'])
+                ->first();
+        }
+
+        // Load media gift_send_proof
+        $submittedData = $order->submited;
+        $submittedData['gift_send_proof'] = $order->getFirstMediaUrl('gift_send_proof');
+        $order->submited = $submittedData;
+
+        return inertia('cms/order/manual-topup/Show', [
+            'order' => $order,
+            'mlAccountNickname' => $mlAccount?->username,
+        ]);
+    }
+
+    /**
+     * Save order updates.
+     */
+    public function save(Order $order, UpdateProgressRequest $request, UpdateProgressAction $action)
+    {
+        Gate::authorize('update'.$this->resource);
+
+        $action->handle($order, $request->validated());
+
+        return back()->with('success', 'Progress pengiriman berhasil disimpan');
+    }
+
+    /**
+     * Send Notification
+     */
+    public function notify(Order $order, SendNotificationRequest $request, SendNotificationAction $action)
+    {
+        Gate::authorize('update'.$this->resource);
+
+        $action->handle($order, $request->validated());
+
+        return back()->with('success', 'Notifikasi berhasil dikirim');
+    }
+}
