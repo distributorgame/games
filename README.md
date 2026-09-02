@@ -150,4 +150,4 @@ APIAGAME_SECRET_KEY=
 
 Jika project ini bermanfaat, dukung pengembangan lebih lanjut:
 
-**Saweria:** https://saweria.co/reincity
+**Saweria:** https://saweria.co/
